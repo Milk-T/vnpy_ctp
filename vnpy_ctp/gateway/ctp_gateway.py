@@ -11,7 +11,7 @@ from vnpy.trader.constant import (
     Exchange,
     OrderType,
     Product,
-    Status,
+    Status,vnpy_ctp
     OptionType
 )
 from vnpy.trader.gateway import BaseGateway
@@ -25,6 +25,12 @@ from vnpy.trader.object import (
     OrderRequest,
     CancelRequest,
     SubscribeRequest,
+    # hxxjava add start
+    MarginData,
+    CommissionData,
+    MarginRequest,
+    CommissionRequest,
+    # hxxjava add end
 )
 from vnpy.trader.utility import get_folder_path, ZoneInfo
 from vnpy.trader.event import EVENT_TIMER
@@ -155,8 +161,21 @@ class CtpGateway(BaseGateway):
         """构造函数"""
         super().__init__(event_engine, gateway_name)
 
+        self.waiting_query_vt_symbols:List[str] = []    # hxxjava add
+
         self.td_api: "CtpTdApi" = CtpTdApi(self)
         self.md_api: "CtpMdApi" = CtpMdApi(self)
+
+    # hxxjava add start
+    def add_waiting_query_vt_symbol(self,vt_symbol:str):
+        self.waiting_query_vt_symbols.append(vt_symbol)
+    def query_commission(self,req:CommissionRequest):
+        """查询手续费数据"""
+        self.td_api.query_commission(req)
+    def query_margin_ratio(self,req:MarginRequest):
+        """查询保证金率数据"""
+        self.td_api.query_margin_ratio(req)
+    # hxxjava add end
 
     def connect(self, setting: dict) -> None:
         """连接交易接口"""
@@ -436,6 +455,113 @@ class CtpTdApi(TdApi):
         self.positions: Dict[str, PositionData] = {}
         self.sysid_orderid_map: Dict[str, str] = {}
 
+    # hxxjava add start
+    def onRspQryInstrumentCommissionRate(self, data: dict, error: dict, reqid: int, last: bool):
+        """查询合约手续费率"""
+        """
+        CommissionRate {
+            'InstrumentID': 'rb', 
+            'InvestorRange': '1', 
+            'BrokerID': '9999', 
+            'InvestorID': '00000000', 
+            'OpenRatioByMoney': 0.0001, 
+            'OpenRatioByVolume': 0.0, 
+            'CloseRatioByMoney': 0.0001, 
+            'CloseRatioByVolume': 0.0, 
+            'CloseTodayRatioByMoney': 0.0001, 
+            'CloseTodayRatioByVolume': 0.0, 
+            'ExchangeID': '', 
+            'BizType': '\x00', 
+            'InvestUnitID': ''
+        }    
+        """
+        # print(f"CommissionRate {data}")
+        # print(f"error {error}")
+        if data:
+            commission = CommissionData(
+                symbol = data['InstrumentID'],
+                exchange = data["ExchangeID"], # EXCHANGE_CTP2VT[data["ExchangeID"]]
+                open_ratio_bymoney=data['OpenRatioByMoney'],
+                open_ratio_byvolume=data['OpenRatioByVolume'],
+                close_ratio_bymoney=data['CloseRatioByMoney'],
+                close_ratio_byvolume=data['CloseRatioByVolume'],
+                close_today_ratio_bymoney=data['CloseTodayRatioByMoney'],
+                close_today_ratio_byvolume=data['CloseTodayRatioByVolume'],
+                gateway_name=self.gateway_name
+            )
+            self.gateway.on_commission(commission)
+    def onRspQryInstrumentMarginRate(self, data: dict, error: dict, reqid: int, last: bool):
+        """
+        查询保证金率
+        MarginRate {
+            'InstrumentID': 'rb2010',
+            'InvestorRange': '1',
+            'BrokerID': '9999',
+            'InvestorID': '147102',
+            'HedgeFlag': '1',
+            'LongMarginRatioByMoney': 0.1,
+            'LongMarginRatioByVolume': 0.0,
+            'ShortMarginRatioByMoney': 0.1,
+            'ShortMarginRatioByVolume': 0.0,
+            'IsRelative': 0,
+            'ExchangeID': '',
+            'InvestUnitID': ''
+        }
+        """
+        # print(f"MarginRate {data}")
+        # print(f"error {error}")
+        if data:
+            margin = MarginData(
+                symbol = data['InstrumentID'],
+                exchange = data["ExchangeID"], # EXCHANGE_CTP2VT[data["ExchangeID"]]
+                long_margin_rate=data["LongMarginRatioByMoney"],
+                long_margin_perlot=data["LongMarginRatioByVolume"],
+                short_margin_rate=data["ShortMarginRatioByMoney"],
+                short_margin_perlot=data["ShortMarginRatioByVolume"],
+                is_ralative=data['IsRelative'],
+                gateway_name=self.gateway_name
+            )
+            self.gateway.on_margin(margin)
+
+    def query_commission(self,req:CommissionRequest):
+        """ 查询手续费率
+        """
+        #手续费率查询字典
+        commission_req = {}
+        commission_req['BrokerID'] = self.brokerid
+        commission_req['InvestorID'] = self.userid
+        commission_req['InstrumentID'] = req.symbol
+        commission_req['ExchangeID'] = req.exchange.value
+        self.reqid += 1
+        #请求查询手续费率
+        count = 10
+        while self.reqQryInstrumentCommissionRate(commission_req,self.reqid) != 0:
+            count -= 1
+            if count > 0:
+                sleep(0.100)
+            else:
+                break
+
+    def query_margin_ratio(self,req:MarginRequest):
+        """ 保证金率查询 """
+        #保证金率查询字典
+        margin_ratio_req = {}
+        margin_ratio_req['BrokerID'] = self.brokerid
+        margin_ratio_req['InvestorID'] = self.userid
+        margin_ratio_req['InstrumentID'] = req.symbol
+        margin_ratio_req['ExchangeID'] = req.exchange.value
+        margin_ratio_req['HedgeFlag'] = THOST_FTDC_HF_Speculation
+        self.reqid += 1
+        #请求查询保证金率
+        count = 10
+        while self.reqQryInstrumentMarginRate(margin_ratio_req,self.reqid) != 0:
+            count -= 1
+            if count > 0:
+                sleep(0.100)
+            else:
+                break
+    # hxxjava add end
+
     def onFrontConnected(self) -> None:
         """服务器连接成功回报"""
         self.gateway.write_log("交易服务器连接成功")
@@ -568,6 +694,10 @@ class CtpTdApi(TdApi):
             if position.volume and size:
                 cost += data["PositionCost"]
                 position.price = cost / (position.volume * size)
+                # start add open-cost
+                position.open_cost = data["OpenCost"]
+                position.open_price = position.open_cost / (position.volume * size)
+                # end add open-cost
 
             # 更新仓位冻结数量
             if position.direction == Direction.LONG:
@@ -590,6 +720,7 @@ class CtpTdApi(TdApi):
             accountid=data["AccountID"],
             balance=data["Balance"],
             frozen=data["FrozenMargin"] + data["FrozenCash"] + data["FrozenCommission"],
+            curr_margin = data['CurrMargin'],
             gateway_name=self.gateway_name
         )
         account.available = data["Available"]
@@ -607,6 +738,17 @@ class CtpTdApi(TdApi):
                 product=product,
                 size=data["VolumeMultiple"],
                 pricetick=data["PriceTick"],
+                # hxxjava add start
+                max_market_order_volume=data["MaxMarketOrderVolume"],
+                min_market_order_volume=data["MinMarketOrderVolume"],
+                max_limit_order_volume=data["MaxLimitOrderVolume"],
+                min_limit_order_volume=data["MinLimitOrderVolume"],
+                open_date=data["OpenDate"],
+                expire_date=data["ExpireDate"],
+                is_trading=data["IsTrading"],
+                long_margin_ratio=data["LongMarginRatio"],
+                short_margin_ratio=data["ShortMarginRatio"],
+                # hxxjava add end
                 gateway_name=self.gateway_name
             )
 
@@ -655,11 +797,6 @@ class CtpTdApi(TdApi):
         order_ref: str = data["OrderRef"]
         orderid: str = f"{frontid}_{sessionid}_{order_ref}"
 
-        status: Status = STATUS_CTP2VT.get(data["OrderStatus"], None)
-        if not status:
-            self.gateway.write_log(f"收到不支持的委托状态，委托号：{orderid}")
-            return
-
         timestamp: str = f"{data['InsertDate']} {data['InsertTime']}"
         dt: datetime = datetime.strptime(timestamp, "%Y%m%d %H:%M:%S")
         dt: datetime = dt.replace(tzinfo=CHINA_TZ)
@@ -680,7 +817,7 @@ class CtpTdApi(TdApi):
             price=data["LimitPrice"],
             volume=data["VolumeTotalOriginal"],
             traded=data["VolumeTraded"],
-            status=status,
+            status=STATUS_CTP2VT[data["OrderStatus"]],
             datetime=dt,
             gateway_name=self.gateway_name
         )
