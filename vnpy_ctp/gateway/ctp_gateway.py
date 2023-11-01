@@ -11,7 +11,7 @@ from vnpy.trader.constant import (
     Exchange,
     OrderType,
     Product,
-    Status,vnpy_ctp
+    Status,
     OptionType
 )
 from vnpy.trader.gateway import BaseGateway
